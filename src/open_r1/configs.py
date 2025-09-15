@@ -136,6 +136,24 @@ class GRPOConfig(trl.GRPOConfig):
         metadata={"help": "The callbacks to run during training."},
     )
     chat_template: Optional[str] = field(default=None, metadata={"help": "The chat template to use."})
+    humanline: bool = field(
+        default=False,
+        metadata={
+            "help": ("Whether to use the humanline variant")
+        },
+    )
+    humanline_log_eps_P: float = field(
+        default=-1.5,
+        metadata={
+            "help": ("lower bound for humanline clipping")
+        },
+    )
+    humanline_log_eps_R: float = field(
+        default=1.5,
+        metadata={
+            "help": ("upper bound for humanline clipping")
+        },
+    )
     hub_model_revision: Optional[str] = field(
         default="main", metadata={"help": "The Hub model branch to push the model to."}
     )
