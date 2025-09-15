@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=open_r1
 #SBATCH --ntasks-per-node=1
+#SBATCH --mem=150G
 #SBATCH --exclusive
 #SBATCH --gres=gpu:8
-#SBATCH --partition=hopper-prod  # Adjust this for your cluster
+#SBATCH --partition=standard_h100
 #SBATCH --output=./logs/%x-%j.out
 #SBATCH --error=./logs/%x-%j.err
 #SBATCH --requeue
-#SBATCH --time=3-00:00:00
+#SBATCH --time=2-00:00:00
 
 
 if [[ "$*" == *"--help"* ]]; then
@@ -22,6 +23,18 @@ if [[ "$*" == *"--help"* ]]; then
   echo "  --args \"ARGS\"          Optional arguments to pass to the training script"
   exit 0
 fi
+
+
+# Cleanup at start (on all allocated nodes)
+echo "Cleaning up any previous artifacts..."
+rm -rf /dev/shm/*torch* /dev/shm/*python* /dev/shm/*$USER*
+rm -rf /tmp/.torch* /tmp/torch_*
+# If using specific rendezvous files
+rm -rf /tmp/rdzv*
+
+# Wait for cleanup
+sleep 5
+
 
 # Specific configuration optimized for the Hugging Face Compute Cluster
 module load cuda/12.4
@@ -120,31 +133,16 @@ MASTER_ADDR=${NODELIST[0]}  # First node for main process
 MASTER_PORT=6000
 TRAIN_NODES=("${NODELIST[@]}")
 
-USE_VLLM="false"
-if [[ -f "$CONFIG_FILE" ]] && grep -qE '^\s*use_vllm:\s*true' "$CONFIG_FILE"; then
-    USE_VLLM="true"
-fi
-# if using vllm
-if [[ "$USE_VLLM" == "true" ]]; then
-     TRAIN_NODES=("${NODELIST[@]:0:$((NUM_NODES - 1))}")
-     VLLM_NODE=${NODELIST[-1]} # Last node
-     WORLD_SIZE=$((WORLD_SIZE - GPUS_PER_NODE))
-     NUM_NODES=$((NUM_NODES - 1))
-     srun --nodes=1 --ntasks=1 --nodelist=$VLLM_NODE trl vllm-serve --model $MODEL --revision $REVISION --tensor_parallel_size $TP --data_parallel_size $DP &
-
-     OPTIONAL_ARGS="$OPTIONAL_ARGS --vllm_server_host=$VLLM_NODE"
-fi
-
 # force crashing on nccl issues like hanging broadcast
 export NCCL_ASYNC_ERROR_HANDLING=1
-# export NCCL_DEBUG=INFO
+export NCCL_DEBUG=INFO
 # export NCCL_DEBUG_SUBSYS=COLL
 # export NCCL_SOCKET_NTHREADS=1
 # export NCCL_NSOCKS_PERTHREAD=1
 # export CUDA_LAUNCH_BLOCKING=1
 
 export CMD=" \
-    src/open_r1/$TASK.py --config $CONFIG_FILE $OPTIONAL_ARGS
+    src/open_r1/$TASK.py --config $CONFIG_FILE --vllm_mode colocate $OPTIONAL_ARGS
     "
 
 export LAUNCHER="ACCELERATE_LOG_LEVEL=info TRANSFORMERS_VERBOSITY=info accelerate launch \
@@ -180,3 +178,12 @@ HOURS=$((ELAPSED_SECONDS / 3600))
 MINUTES=$(( (ELAPSED_SECONDS % 3600) / 60 ))
 SECONDS=$((ELAPSED_SECONDS % 60))
 echo "TOTAL JOB TIME: ${HOURS}h ${MINUTES}m ${SECONDS}s (${ELAPSED_SECONDS} seconds)"
+
+
+# Cleanup at exit (runs even if job fails)
+cleanup() {
+    echo "Cleaning up..."
+    rm -rf /dev/shm/*torch* /dev/shm/*$USER*
+    rm -rf /tmp/.torch* /tmp/torch_*
+}
+trap cleanup EXIT
