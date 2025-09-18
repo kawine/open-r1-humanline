@@ -154,6 +154,12 @@ class GRPOConfig(trl.GRPOConfig):
             "help": ("upper bound for humanline clipping")
         },
     )
+    humanline_sync_freq: int = field(
+        default=1,
+        metadata={
+            "help": ("how frequently to do humanline syncing")
+        },
+    )
     hub_model_revision: Optional[str] = field(
         default="main", metadata={"help": "The Hub model branch to push the model to."}
     )

@@ -20,7 +20,8 @@ import torch.nn.functional as F
 
 import datasets
 import transformers
-from transformers import set_seed
+from accelerate import Accelerator
+from transformers import set_seed, TrainerCallback, PreTrainedModel
 from transformers.trainer_utils import get_last_checkpoint
 from typing import Any, Callable, Optional, Union
 
@@ -33,6 +34,35 @@ from trl import GRPOTrainer, ModelConfig, TrlParser, get_peft_config
 
 
 logger = logging.getLogger(__name__)
+
+
+class SyncRefModelCallback(TrainerCallback):
+    """
+    Callback to synchronize the model with a reference model.
+    """
+
+    def __init__(
+        self,
+        ref_model: Union[PreTrainedModel, torch.nn.Module],
+        accelerator: Optional[Accelerator],
+    ):
+        self.accelerator = accelerator
+        self.ref_model = ref_model
+        self.policy_state_dict = None
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        """
+        Update the reference model to have the policy weights.
+        """
+        model: PreTrainedModel = kwargs["model"]
+        if self.ref_model is not None:
+            self.policy_state_dict = self.accelerator.get_state_dict(model)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step % args.humanline_sync_freq == 0:
+            self.accelerator.unwrap_model(self.ref_model).load_state_dict(self.policy_state_dict)
+            self.accelerator.wait_for_everyone()
+            self.ref_model.eval()
 
 
 def selective_log_softmax(logits, index) -> torch.Tensor:
@@ -117,6 +147,12 @@ class HumanlineGRPOTrainer(GRPOTrainer):
 
     NOTE: TRL only instantiates a reference model if beta>0.
     """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        if self.args.humanline:
+            self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
+
     def _get_per_token_logps_and_entropies(
         self,
         model,
@@ -177,48 +213,6 @@ class HumanlineGRPOTrainer(GRPOTrainer):
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         return logps, entropies
 
-    def _copy_policy_to_ref(self):
-        # If no reference model is present, nothing to do.
-        ref_model = getattr(self, "ref_model", None)
-        if ref_model is None:
-            return
-
-        # Unwrap (handles DDP/Deepspeed/FSDP) and get underlying module if needed.
-        policy = self.accelerator.unwrap_model(self.model)
-        ref    = self.accelerator.unwrap_model(ref_model)
-        policy_module = getattr(policy, "module", policy)
-        ref_module    = getattr(ref, "module", ref)
-
-        with torch.no_grad():
-            # If both sides are PEFT models, copy only the adapter weights
-            try:
-                from peft import PeftModel
-                from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
-                if isinstance(policy_module, PeftModel) and isinstance(ref_module, PeftModel):
-                    adapter_name = getattr(policy_module, "active_adapter", "default")
-                    peft_sd = get_peft_model_state_dict(policy_module, adapter_name=adapter_name)
-                    # tolerate missing keys if ref has extra buffers
-                    set_peft_model_state_dict(
-                        ref_module, peft_sd, adapter_name=adapter_name, mismatch_tolerance=True
-                    )
-                else:
-                    raise RuntimeError("Not PEFT on both models; fall back to full state_dict.")
-            except Exception:
-                # Generic path (full FT or mixed setups).
-                # Use Accelerate’s consolidated state dict when available (handles ZeRO-3/FSDP safely).
-                try:
-                    sd = self.accelerator.get_state_dict(policy_module)
-                except Exception:
-                    sd = policy_module.state_dict()
-                # strict=False tolerates buffers or non-trainable deltas
-                ref_module.load_state_dict(sd, strict=False)
-
-            # Keep the reference model frozen/in eval.
-            ref_module.eval()
-            for p in ref_module.parameters():
-                p.requires_grad_(False)
-
-    
     def _compute_loss(self, model, inputs):
         # Compute the per-token log probabilities for the model
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
@@ -339,13 +333,6 @@ class HumanlineGRPOTrainer(GRPOTrainer):
         gathered_clip_ratio = self.accelerator.gather(clip_ratio)
         self._metrics[mode]["clip_ratio/region_mean"].append(gathered_clip_ratio.nanmean().item())
         return loss
-
-    def optimizer_step(self, *args, **kwargs):
-        # humanline syncing: Loss/backward have already happened; mirror policy -> ref now, then step.
-        if self.args.humanline:
-            self._copy_policy_to_ref()
-
-        return super().optimizer_step(*args, **kwargs)
 
 
 def main(script_args, training_args, model_args):
