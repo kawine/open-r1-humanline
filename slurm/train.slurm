@@ -28,40 +28,16 @@ fi
 # Cleanup at start (on all allocated nodes)
 echo "Cleaning up any previous artifacts..."
 rm -rf /dev/shm/*torch* /dev/shm/*python* /dev/shm/*$USER*
-rm -rf /tmp/.torch* /tmp/torch_*
+rm -rf /tmp/*torch* /tmp/torch_* /tmp/vllm*
 # If using specific rendezvous files
 rm -rf /tmp/rdzv*
 
-# 1. Clear NCCL shared memory segments
-rm -rf /dev/shm/nccl-*
+export VLLM_CACHE_ROOT=/tmp/vllm_cache_${SLURM_JOBID}_rank_${SLURM_LOCALID}
+export TORCH_COMPILE_CACHE_DIR=/tmp/torch_compile_${SLURM_JOBID}_rank_${SLURM_LOCALID}
+export VLLM_PORT=$((8000 + SLURM_LOCALID))
 
-# 2. Clear any wandb artifacts (even if offline)
-rm -rf /tmp/wandb*
-rm -rf ~/.cache/wandb*
-
-# 3. Clear HuggingFace cache locks that might be stuck
-rm -rf ~/.cache/huggingface/hub/.locks
-rm -rf ~/.cache/huggingface/accelerate/*.lock
-
-# 4. Clear vLLM specific artifacts (since you mentioned vLLM)
-rm -rf /tmp/vllm*
-rm -rf ~/.cache/vllm*
-rm -rf /dev/shm/vllm*
-
-# 5. Clear Ray artifacts (if vLLM uses Ray)
-rm -rf /tmp/ray*
-rm -rf /dev/shm/ray*
-rm -rf ~/.ray
-
-# 6. Kill any zombie processes from your user (be careful with this)
-# Only uncomment if you're sure no other jobs are running
-pkill -u $USER -f python3
-pkill -u $USER -f python
-pkill -u $USER -f vllm
-
-# 7. Clear any distributed training port locks
-rm -rf /tmp/.distributed*
-rm -rf /tmp/.torch_distributed*
+# Or use more aggressive garbage collection
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.6,expandable_segments:True
 
 # Wait for cleanup
 sleep 5
