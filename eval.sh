@@ -1,12 +1,11 @@
 #!/bin/bash
 
 # Configuration
-MODEL_NAME="Qwen2.5-1.5B-Instruct_128_010_100"
+MODEL_NAME="Qwen2.5-1.5B-Instruct_humanline_64_010_050_16_5e-7"
 BASE_DIR="/scratch/kawin/open-r1/data"
 MODEL_DIR="${BASE_DIR}/${MODEL_NAME}"
 NUM_GPUS=1
 TASK="math_500"
-
 
 # CRITICAL: Fix CUDA fork issue
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
