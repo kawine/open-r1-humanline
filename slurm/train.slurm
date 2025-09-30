@@ -27,14 +27,42 @@ fi
 
 # Cleanup at start (on all allocated nodes)
 echo "Cleaning up any previous artifacts..."
-rm -rf /dev/shm/*torch* /dev/shm/*python* /dev/shm/*$USER*
-rm -rf /tmp/*torch* /tmp/torch_* /tmp/vllm*
+rm -rf /dev/shm/*torch* /dev/shm/*python* /dev/shm/*$USER* /dev/shm/nccl-* /dev/shm/cuda_*
+rm -rf /tmp/*torch* /tmp/torch_* /tmp/vllm* /tmp/hf_cache*
 # If using specific rendezvous files
 rm -rf /tmp/rdzv*
+
+# vLLM/Ray locks (if using Ray)
+rm -rf /tmp/ray*
+rm -rf /dev/shm/plasma_*
+rm -rf ~/.ray
+
+# Remove System V shared memory segments owned by you
+for id in $(ipcs -m | grep $USER | awk '{print $2}'); do
+    echo "Removing shared memory segment $id"
+    ipcrm -m $id 2>/dev/null
+done
+
+# Remove POSIX shared memory
+ls /dev/shm/ | grep -E "sem\.|shm\." | while read f; do
+    rm -f /dev/shm/$f 2>/dev/null
+done
+
+# 3. Semaphores (can block distributed init)
+for id in $(ipcs -s | grep $USER | awk '{print $2}'); do
+    echo "Removing semaphore $id"
+    ipcrm -s $id 2>/dev/null
+done
+
+# File-based locks in tmp
+find /tmp -user $USER -name "*.lock" -delete 2>/dev/null
+find /tmp -user $USER -name "*_lock" -delete 2>/dev/null
 
 export VLLM_CACHE_ROOT=/tmp/vllm_cache_${SLURM_JOBID}_rank_${SLURM_LOCALID}
 export TORCH_COMPILE_CACHE_DIR=/tmp/torch_compile_${SLURM_JOBID}_rank_${SLURM_LOCALID}
 export VLLM_PORT=$((8000 + SLURM_LOCALID))
+
+export HF_HOME=/tmp/hf_cache_${SLURM_JOBID}
 
 # Or use more aggressive garbage collection
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.6,expandable_segments:True
